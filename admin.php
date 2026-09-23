@@ -991,12 +991,20 @@ if (isset($_GET['action'])) {
         if (!$authenticated) {
             $students = file_exists($studentsFile) ? json_decode(safe_file_get_contents($studentsFile), true) : [];
             if (is_array($students)) {
-                foreach ($students as $s) {
+                $student_updated = false;
+                foreach ($students as &$s) {
                     if (trim($s['id']) === trim($input_username) && trim($s['password']) === trim($input_password)) {
                         $is_student = true;
+                        $s['loginCount'] = intval($s['loginCount'] ?? 0) + 1;
+                        $s['lastLogin'] = date('H:i d/m/Y');
+                        $student_updated = true;
                         $matched_student = $s;
                         break;
                     }
+                }
+                unset($s);
+                if ($student_updated) {
+                    safe_file_put_contents($studentsFile, json_encode($students, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
                 }
             }
         }
@@ -1051,7 +1059,9 @@ if (isset($_GET['action'])) {
                 'studyScores' => $normalizedScores,
                 'studyScoresPublished' => $normalizedPub,
                 'bonusPoints' => $matched_student['bonusPoints'] ?? 0,
-                'bonusPointsHistory' => $matched_student['bonusPointsHistory'] ?? []
+                'bonusPointsHistory' => $matched_student['bonusPointsHistory'] ?? [],
+                'loginCount' => $matched_student['loginCount'] ?? 1,
+                'lastLogin' => $matched_student['lastLogin'] ?? date('H:i d/m/Y')
             ));
         } else {
             while (ob_get_level() > 0) ob_end_clean();
@@ -1210,12 +1220,16 @@ if (isset($_GET['action'])) {
             $studyScores = null;
             $bonusPoints = 0;
             $bonusPointsHistory = [];
+            $loginCount = 0;
+            $lastLogin = '';
             $student_teacher = $_SESSION['student_teacher'] ?? 'thaytuan@admin';
             foreach ($students as $s) {
                 if ($s['id'] === $_SESSION['student_id']) {
                     $studyScores = $s['studyScores'] ?? null;
                     $bonusPoints = $s['bonusPoints'] ?? 0;
                     $bonusPointsHistory = $s['bonusPointsHistory'] ?? [];
+                    $loginCount = intval($s['loginCount'] ?? 0);
+                    $lastLogin = $s['lastLogin'] ?? '';
                     break;
                 }
             }
@@ -1245,7 +1259,9 @@ if (isset($_GET['action'])) {
                 'studyScores' => $normalizedScores,
                 'studyScoresPublished' => $normalizedPub,
                 'bonusPoints' => $bonusPoints,
-                'bonusPointsHistory' => $bonusPointsHistory
+                'bonusPointsHistory' => $bonusPointsHistory,
+                'loginCount' => $loginCount,
+                'lastLogin' => $lastLogin
             ));
         } else {
             echo json_encode(array('loggedIn' => false));
@@ -1479,7 +1495,10 @@ if (isset($_GET['action'])) {
         if (!is_array($students)) $students = [];
         foreach ($students as &$s) {
             $s['studyScores'] = normalize_study_scores($s['studyScores'] ?? null);
+            $s['loginCount'] = intval($s['loginCount'] ?? 0);
+            $s['lastLogin'] = $s['lastLogin'] ?? '';
         }
+        unset($s);
         
         $current_admin = $_SESSION['admin_username'];
         $is_owner = (strtolower($current_admin) === 'thaytuan@admin');
@@ -1659,13 +1678,48 @@ if (isset($_GET['action'])) {
                 $new_acc['fullName'] = trim(mb_strtoupper($new_acc['fullName'] ?? '', 'UTF-8'));
                 $new_acc['class'] = trim(mb_strtoupper($new_acc['class'] ?? '', 'UTF-8'));
                 $new_acc['teacher'] = $_SESSION['admin_username'];
+                $new_acc['loginCount'] = 0;
+                $new_acc['lastLogin'] = '';
                 $existing[] = $new_acc;
                 $added++;
             }
         }
         
-        safe_file_put_contents($studentsFile, json_encode($existing, JSON_PRETTY_PRINT));
+        safe_file_put_contents($studentsFile, json_encode($existing, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         echo json_encode(['success' => true, 'added' => $added]);
+        exit;
+    }
+
+    if ($action === 'reset_student_login_count' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $studentsFile = __DIR__ . DIRECTORY_SEPARATOR . 'students_accounts.json';
+        $existing = file_exists($studentsFile) ? json_decode(safe_file_get_contents($studentsFile), true) : [];
+        if (!is_array($existing)) $existing = [];
+        
+        $input = json_decode(file_get_contents('php://input'), true);
+        $id = trim($input['id'] ?? '');
+        
+        $found = false;
+        $currentAdmin = strtolower($_SESSION['admin_username'] ?? '');
+        $isOwner = ($currentAdmin === 'thaytuan@admin' || !empty($_SESSION['is_owner']));
+        
+        foreach ($existing as &$e) {
+            if ($e['id'] === $id) {
+                if ($isOwner || strtolower($e['teacher'] ?? '') === $currentAdmin) {
+                    $e['loginCount'] = 0;
+                    $e['lastLogin'] = '';
+                    $found = true;
+                    break;
+                }
+            }
+        }
+        unset($e);
+        
+        if ($found) {
+            safe_file_put_contents($studentsFile, json_encode($existing, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            echo json_encode(['success' => true]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Không tìm thấy tài khoản hoặc bạn không có quyền!']);
+        }
         exit;
     }
 
@@ -1726,6 +1780,74 @@ if (isset($_GET['action'])) {
             echo json_encode(['success' => true]);
         } else {
             echo json_encode(['success' => false, 'message' => 'Không thể đổi mật khẩu!']);
+        }
+        exit;
+    }
+
+    if ($action === 'update_student_info' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        while (ob_get_level() > 0) ob_end_clean();
+        header('Content-Type: application/json; charset=utf-8');
+        $existing = file_exists($studentsFile) ? json_decode(safe_file_get_contents($studentsFile), true) : [];
+        if (!is_array($existing)) $existing = [];
+        
+        $input = json_decode(file_get_contents('php://input'), true);
+        $oldId = trim($input['oldId'] ?? ($input['id'] ?? ''));
+        $newId = trim($input['newId'] ?? ($input['id'] ?? ''));
+        $fullName = trim($input['fullName'] ?? '');
+        $class = trim($input['class'] ?? '');
+        $password = trim($input['password'] ?? '');
+
+        if (empty($oldId)) {
+            echo json_encode(['success' => false, 'message' => 'Mã học sinh không hợp lệ!']);
+            exit;
+        }
+        if (empty($newId)) {
+            echo json_encode(['success' => false, 'message' => 'Mã học sinh mới không được để trống!']);
+            exit;
+        }
+        if (empty($fullName)) {
+            echo json_encode(['success' => false, 'message' => 'Họ và tên không được để trống!']);
+            exit;
+        }
+        if (empty($class)) {
+            echo json_encode(['success' => false, 'message' => 'Lớp không được để trống!']);
+            exit;
+        }
+
+        // Check duplicate newId if changed
+        if ($newId !== $oldId) {
+            foreach ($existing as $e) {
+                if (($e['id'] ?? '') === $newId) {
+                    echo json_encode(['success' => false, 'message' => "Mã học sinh $newId đã tồn tại trên hệ thống!"]);
+                    exit;
+                }
+            }
+        }
+
+        $found = false;
+        $currentAdmin = strtolower($_SESSION['admin_username'] ?? '');
+        $isOwner = ($currentAdmin === 'thaytuan@admin' || !empty($_SESSION['is_owner']));
+
+        foreach ($existing as &$e) {
+            if (($e['id'] ?? '') === $oldId) {
+                if ($isOwner || strtolower($e['teacher'] ?? '') === $currentAdmin) {
+                    $e['id'] = $newId;
+                    $e['fullName'] = mb_strtoupper($fullName, 'UTF-8');
+                    $e['class'] = mb_strtoupper($class, 'UTF-8');
+                    if (!empty($password)) {
+                        $e['password'] = $password;
+                    }
+                    $found = true;
+                    break;
+                }
+            }
+        }
+
+        if ($found) {
+            safe_file_put_contents($studentsFile, json_encode($existing, JSON_PRETTY_PRINT));
+            echo json_encode(['success' => true]);
+        } else {
+            echo json_encode(['success' => false, 'message' => 'Không tìm thấy tài khoản hoặc bạn không có quyền chỉnh sửa!']);
         }
         exit;
     }
@@ -6970,6 +7092,246 @@ if (isset($_GET['action'])) {
             );
         };
 
+        const EditStudentInfoModal = ({ student, classes = [], onClose, onSaved, showAlert }) => {
+            const [formId, setFormId] = useState(student ? (student.id || '') : '');
+            const [formFullName, setFormFullName] = useState(student ? (student.fullName || '') : '');
+            const [formClass, setFormClass] = useState(student ? (student.class || '') : '');
+            const [formPassword, setFormPassword] = useState(student ? (student.password || '') : '');
+            const [showPassword, setShowPassword] = useState(false);
+            const [isSubmitting, setIsSubmitting] = useState(false);
+
+            const handleResetPassword = () => {
+                const cleanName = (formFullName || '').normalize("NFD")
+                    .replace(/[\u0300-\u036f]/g, "")
+                    .replace(/đ/g, "d")
+                    .replace(/Đ/g, "d")
+                    .toLowerCase();
+                const nameParts = cleanName.split(/\s+/).filter(Boolean);
+                const initials = nameParts.map(p => p.charAt(0)).join("");
+                const defaultPass = (initials || 'hs') + "123@";
+                setFormPassword(defaultPass);
+            };
+
+            const handleSubmit = (e) => {
+                if (e) e.preventDefault();
+                const cleanId = formId.trim();
+                const cleanName = formFullName.trim().toUpperCase();
+                const cleanClass = formClass.trim().toUpperCase();
+                const cleanPass = formPassword.trim();
+
+                if (!cleanId) return showAlert("Mã học sinh không được để trống!");
+                if (!cleanName) return showAlert("Họ và tên không được để trống!");
+                if (!cleanClass) return showAlert("Lớp không được để trống!");
+                if (!cleanPass) return showAlert("Mật khẩu không được để trống!");
+
+                setIsSubmitting(true);
+                fetch('?action=update_student_info', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        oldId: student.id,
+                        newId: cleanId,
+                        fullName: cleanName,
+                        class: cleanClass,
+                        password: cleanPass
+                    })
+                })
+                .then(r => r.json())
+                .then(res => {
+                    setIsSubmitting(false);
+                    if (res.success) {
+                        showAlert("Cập nhật thông tin học sinh thành công!");
+                        if (onSaved) {
+                            onSaved({
+                                ...student,
+                                id: cleanId,
+                                fullName: cleanName,
+                                class: cleanClass,
+                                password: cleanPass
+                            }, student.id);
+                        }
+                        onClose();
+                    } else {
+                        showAlert(res.message || "Lỗi khi cập nhật thông tin học sinh!");
+                    }
+                })
+                .catch(() => {
+                    setIsSubmitting(false);
+                    showAlert("Lỗi kết nối máy chủ khi lưu thông tin!");
+                });
+            };
+
+            const classList = Array.from(new Set([
+                ...(classes || []).map(c => typeof c === 'string' ? c : (c.className || '')).filter(Boolean),
+                formClass
+            ])).filter(Boolean).sort();
+
+            return (
+                <div className="fixed inset-0 z-[150] bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-slate-100 animate-in zoom-in-95 duration-200">
+                        <div className="px-6 py-4 bg-gradient-to-r from-sky-600 via-indigo-600 to-indigo-700 text-white flex justify-between items-center shadow-sm">
+                            <div className="flex items-center gap-2.5">
+                                <div className="p-2 bg-white/15 rounded-xl">
+                                    <Icon name="user-check" size={18} />
+                                </div>
+                                <div>
+                                    <h3 className="font-black text-sm tracking-wide">Chỉnh sửa thông tin học sinh</h3>
+                                    <p className="text-[11px] text-sky-100/90 font-medium">Cập nhật Mã HS, Họ tên, Lớp và Mật khẩu</p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all"
+                            >
+                                <Icon name="x" size={16} />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                            <div>
+                                <label className="block text-[11px] font-black uppercase tracking-wider text-slate-500 mb-1">
+                                    Mã học sinh (ID đăng nhập)
+                                </label>
+                                <input
+                                    type="text"
+                                    value={formId}
+                                    onChange={e => setFormId(e.target.value)}
+                                    placeholder="Ví dụ: 25121201"
+                                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-xs text-slate-800 focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 outline-none transition-all"
+                                    required
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Lưu ý: Nếu đổi mã học sinh, điểm số và các thông tin đã lưu vẫn được giữ nguyên.</p>
+                            </div>
+
+                            <div>
+                                <label className="block text-[11px] font-black uppercase tracking-wider text-slate-500 mb-1">
+                                    Họ và tên học sinh
+                                </label>
+                                <input
+                                    type="text"
+                                    value={formFullName}
+                                    onChange={e => setFormFullName(e.target.value.toUpperCase())}
+                                    placeholder="Ví dụ: NGUYỄN VĂN A"
+                                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 outline-none transition-all uppercase"
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <label className="block text-[11px] font-black uppercase tracking-wider text-slate-500 mb-1">
+                                    Lớp
+                                </label>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={formClass}
+                                        onChange={e => setFormClass(e.target.value.toUpperCase())}
+                                        placeholder="Ví dụ: 12A1"
+                                        className="flex-1 px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs text-slate-800 focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 outline-none transition-all uppercase"
+                                        required
+                                    />
+                                    {classList.length > 0 && (
+                                        <select
+                                            value={formClass}
+                                            onChange={e => setFormClass(e.target.value)}
+                                            className="px-3 py-2.5 bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none cursor-pointer"
+                                        >
+                                            <option value="">-- Chọn lớp --</option>
+                                            {classList.map(c => (
+                                                <option key={c} value={c}>{c}</option>
+                                            ))}
+                                        </select>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div>
+                                <div className="flex justify-between items-center mb-1">
+                                    <label className="block text-[11px] font-black uppercase tracking-wider text-slate-500">
+                                        Mật khẩu đăng nhập
+                                    </label>
+                                    <button
+                                        type="button"
+                                        onClick={handleResetPassword}
+                                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors"
+                                        title="Đặt lại mật khẩu theo quy tắc viết tắt tên + 123@"
+                                    >
+                                        <Icon name="rotate-ccw" size={10} /> Đặt lại mặc định
+                                    </button>
+                                </div>
+                                <div className="relative">
+                                    <input
+                                        type={showPassword ? "text" : "password"}
+                                        value={formPassword}
+                                        onChange={e => setFormPassword(e.target.value)}
+                                        placeholder="Mật khẩu học sinh..."
+                                        className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-xs text-slate-800 focus:bg-white focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 outline-none transition-all pr-10"
+                                        required
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowPassword(!showPassword)}
+                                        className="absolute right-3 top-2.5 text-slate-400 hover:text-slate-600"
+                                    >
+                                        <Icon name={showPassword ? "eye-off" : "eye"} size={15} />
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Thống kê đăng nhập hệ thống */}
+                            <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl flex items-center justify-between text-xs">
+                                <div className="flex items-center gap-2.5">
+                                    <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                                        <Icon name="log-in" size={14} />
+                                    </div>
+                                    <div>
+                                        <div className="font-black text-slate-700 uppercase text-[10px] tracking-wider">Số lần đăng nhập</div>
+                                        <div className="text-[11px] text-slate-500 font-medium mt-0.5">
+                                            {student.lastLogin ? `Lần cuối: ${student.lastLogin}` : 'Chưa từng đăng nhập hệ thống'}
+                                        </div>
+                                    </div>
+                                </div>
+                                <span className={`px-2.5 py-1 rounded-full text-xs font-black ${
+                                    Number(student.loginCount || 0) > 0 ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-slate-200 text-slate-600'
+                                }`}>
+                                    {Number(student.loginCount || 0)} lần
+                                </span>
+                            </div>
+
+                            <div className="pt-3 flex items-center justify-end gap-2.5 border-t border-slate-100">
+                                <button
+                                    type="button"
+                                    onClick={onClose}
+                                    disabled={isSubmitting}
+                                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-xl transition-all"
+                                >
+                                    Hủy bỏ
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={isSubmitting}
+                                    className="px-5 py-2.5 bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-700 hover:to-indigo-700 text-white text-xs font-black rounded-xl shadow-md shadow-indigo-500/20 transition-all flex items-center gap-1.5"
+                                >
+                                    {isSubmitting ? (
+                                        <>
+                                            <Icon name="loader-2" className="animate-spin" size={14} />
+                                            Đang lưu...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Icon name="check" size={14} />
+                                            Lưu thay đổi
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
         const StudentAccountModal = ({ onClose, showAlert, showConfirm, showDangerConfirm, globalClasses = [] }) => {
             const [students, setStudents] = useState([]);
             const [searchQuery, setSearchQuery] = useState('');
@@ -6979,6 +7341,7 @@ if (isset($_GET['action'])) {
             const [selectedClass, setSelectedClass] = useState(null);
             const [showSyncModal, setShowSyncModal] = useState(false);
             const [editingStudyScores, setEditingStudyScores] = useState(null);
+            const [editingStudentInfo, setEditingStudentInfo] = useState(null);
 
 
             const handleSaveStudyScores = (studentId, scores, callback, semester = 'hk1') => {
@@ -7279,42 +7642,60 @@ if (isset($_GET['action'])) {
             };
 
             const uniqueClasses = (globalClasses || []).map(c => c.className).filter(Boolean).sort();
+            const [loginFilter, setLoginFilter] = useState('all');
+
+            const currentClassStudents = students.filter(s => selectedClass === 'all' || s.class === selectedClass);
 
             const filtered = students.filter(s => {
                 const matchSearch = (s.fullName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                                     (s.id || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                                     (s.class || '').toLowerCase().includes(searchQuery.toLowerCase());
                 const matchClass = selectedClass === 'all' || s.class === selectedClass;
-                return matchSearch && matchClass;
+                const matchLogin = loginFilter === 'all' ? true :
+                                   loginFilter === 'active' ? (Number(s.loginCount || 0) > 0) :
+                                   (Number(s.loginCount || 0) === 0);
+                return matchSearch && matchClass && matchLogin;
             });
 
             return (
-                <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
-                    <div className="bg-white w-full max-w-5xl h-[85vh] rounded-[2rem] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in duration-300 relative">
+                <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-3 md:p-6">
+                    <div className="bg-white w-full max-w-[1400px] h-[92vh] md:h-[88vh] rounded-[2rem] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in duration-300 relative border border-slate-100">
                         <header className="p-5 border-b flex justify-between items-center bg-slate-50 shrink-0">
                             <div className="flex items-center gap-3">
-                                <div className="p-2 bg-fuchsia-100 text-fuchsia-600 rounded-lg"><Icon name="users" size={14}/></div>
+                                <div className="p-2.5 bg-fuchsia-100 text-fuchsia-600 rounded-xl"><Icon name="users" size={16}/></div>
                                 <div>
-                                    <h2 className="text-base font-black uppercase tracking-widest text-slate-800">Quản lý tài khoản Học sinh</h2>
-                                    <p className="text-[10px] font-bold text-slate-400 mt-0.5">Tải file Excel mẫu và cấp tài khoản tự động hàng loạt</p>
+                                    <h2 className="text-base md:text-lg font-black uppercase tracking-widest text-slate-800">Quản lý tài khoản Học sinh</h2>
+                                    <p className="text-[10px] md:text-xs font-bold text-slate-400 mt-0.5">Tải file Excel mẫu và cấp tài khoản tự động hàng loạt</p>
                                 </div>
                             </div>
                             <button type="button" onClick={onClose} className="w-8 h-8 flex items-center justify-center bg-rose-500 text-white hover:bg-rose-600 rounded-full transition-colors shadow-md"><Icon name="x" size={18}/></button>
                         </header>
 
-                        <div className="p-5 bg-white border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4 shrink-0">
-                            <div className="relative w-full sm:w-80">
-                                <input 
-                                    type="text" 
-                                    placeholder="Tìm theo Tên, Lớp hoặc ID..." 
-                                    value={searchQuery}
-                                    onChange={e => setSearchQuery(e.target.value)}
-                                    className="w-full bg-slate-50 border border-slate-200 px-4 py-2.5 pl-10 rounded-xl outline-none focus:bg-white focus:border-fuchsia-500 text-xs font-bold transition-all text-slate-700" 
-                                />
-                                <div className="absolute left-3.5 top-3.5 text-slate-400"><Icon name="search" size={11}/></div>
+                        <div className="p-4 md:p-5 bg-white border-b border-slate-100 flex flex-col lg:flex-row justify-between items-center gap-4 shrink-0">
+                            <div className="flex gap-2.5 w-full lg:w-auto flex-1 max-w-xl">
+                                <div className="relative flex-1">
+                                    <input 
+                                        type="text" 
+                                        placeholder="Tìm theo Tên, Lớp hoặc ID học sinh..." 
+                                        value={searchQuery}
+                                        onChange={e => setSearchQuery(e.target.value)}
+                                        className="w-full bg-slate-50 border border-slate-200 px-4 py-2.5 pl-10 rounded-xl outline-none focus:bg-white focus:border-fuchsia-500 text-xs font-bold transition-all text-slate-700" 
+                                    />
+                                    <div className="absolute left-3.5 top-3.5 text-slate-400"><Icon name="search" size={12}/></div>
+                                </div>
+                                <select 
+                                    value={loginFilter} 
+                                    onChange={e => setLoginFilter(e.target.value)}
+                                    className="bg-slate-50 border border-slate-200 px-3.5 py-2.5 rounded-xl text-xs font-bold text-slate-700 outline-none focus:bg-white focus:border-fuchsia-500 transition-all cursor-pointer shrink-0"
+                                    title="Lọc học sinh theo trạng thái đăng nhập"
+                                >
+                                    <option value="all">Tất cả ({currentClassStudents.length})</option>
+                                    <option value="active">Đã đăng nhập ({currentClassStudents.filter(s => Number(s.loginCount || 0) > 0).length})</option>
+                                    <option value="inactive">Chưa đăng nhập ({currentClassStudents.filter(s => Number(s.loginCount || 0) === 0).length})</option>
+                                </select>
                             </div>
 
-                            <div className="flex gap-2.5 w-full sm:w-auto">
+                            <div className="flex gap-2.5 w-full lg:w-auto flex-wrap sm:flex-nowrap justify-end">
                                 <button onClick={() => setShowGuide(true)} className="flex-1 sm:flex-none justify-center px-4 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 font-black uppercase tracking-widest text-[10px] rounded-xl transition-all flex items-center gap-1.5">
                                     <Icon name="help-circle" size={12}/> Hướng dẫn
                                 </button>
@@ -7333,14 +7714,14 @@ if (isset($_GET['action'])) {
 
                         <div className="flex-1 flex overflow-hidden">
                             {/* Cột trái: Danh sách lớp */}
-                            <div className="w-56 border-r border-slate-100 bg-slate-50/50 flex flex-col shrink-0">
+                            <div className="w-56 md:w-60 border-r border-slate-100 bg-slate-50/50 flex flex-col shrink-0">
                                 <div className="p-4 border-b border-slate-100 bg-slate-50 shrink-0">
                                     <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5"><Icon name="folder" size={12}/> Danh sách lớp</h3>
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
                                     <button 
                                         onClick={() => setSelectedClass('all')}
-                                        className={`w-full text-left px-3 py-2.5 rounded-xl font-bold text-xs flex justify-between items-center transition-all ${selectedClass === 'all' ? 'bg-fuchsia-600 text-white shadow-md shadow-fuchsia-500/20' : 'text-slate-600 hover:bg-slate-100/80'}`}
+                                        className={`w-full text-left px-3.5 py-2.5 rounded-xl font-bold text-xs flex justify-between items-center transition-all ${selectedClass === 'all' ? 'bg-fuchsia-600 text-white shadow-md shadow-fuchsia-500/20' : 'text-slate-600 hover:bg-slate-100/80'}`}
                                     >
                                         <span>Tất cả học sinh</span>
                                         <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold ${selectedClass === 'all' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-500'}`}>{students.length}</span>
@@ -7351,7 +7732,7 @@ if (isset($_GET['action'])) {
                                             <div 
                                                 key={c}
                                                 onClick={() => setSelectedClass(c)}
-                                                className={`group w-full px-3 py-2.5 rounded-xl font-bold text-xs flex justify-between items-center transition-all cursor-pointer ${selectedClass === c ? 'bg-fuchsia-600 text-white shadow-md shadow-fuchsia-500/20' : 'text-slate-600 hover:bg-slate-100/80'}`}
+                                                className={`group w-full px-3.5 py-2.5 rounded-xl font-bold text-xs flex justify-between items-center transition-all cursor-pointer ${selectedClass === c ? 'bg-fuchsia-600 text-white shadow-md shadow-fuchsia-500/20' : 'text-slate-600 hover:bg-slate-100/80'}`}
                                             >
                                                 <span className="truncate">{c}</span>
                                                 <div className="flex items-center gap-1.5 shrink-0">
@@ -7372,7 +7753,7 @@ if (isset($_GET['action'])) {
 
                             {/* Cột phải: Bảng tài khoản */}
                             <div className="flex-1 flex flex-col overflow-hidden bg-white">
-                                <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                                <div className="flex-1 overflow-y-auto p-4 md:p-6 custom-scrollbar">
                                     {selectedClass === null ? (
                                         <div className="py-20 text-center flex flex-col items-center justify-center text-slate-400 opacity-60">
                                             <Icon name="folder-open" size={48} className="mb-3" />
@@ -7391,41 +7772,65 @@ if (isset($_GET['action'])) {
                                         </div>
                                     ) : (
                                         <div className="overflow-x-auto">
-                                            <table className="w-full text-left border-collapse">
+                                            <table className="w-full text-left border-collapse min-w-[950px]">
                                                 <thead>
-                                                    <tr className="border-b border-slate-100 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                                                        <th className="pb-3 pl-4">STT</th>
-                                                        <th className="pb-3">ID (Tài khoản)</th>
-                                                        <th className="pb-3">Họ và tên</th>
-                                                        <th className="pb-3">Lớp</th>
-                                                        <th className="pb-3">Mật khẩu</th>
-                                                        <th className="pb-3">Giáo viên cấp</th>
-                                                        <th className="pb-3 pr-4 text-right">Thao tác</th>
+                                                    <tr className="border-b border-slate-100 text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-50/50">
+                                                        <th className="py-3.5 pl-4 pr-2 text-center w-12">STT</th>
+                                                        <th className="py-3.5 px-3 whitespace-nowrap">ID (Tài khoản)</th>
+                                                        <th className="py-3.5 px-4 min-w-[180px]">Họ và tên</th>
+                                                        <th className="py-3.5 px-3 text-center whitespace-nowrap">Lớp</th>
+                                                        <th className="py-3.5 px-3 whitespace-nowrap">Mật khẩu</th>
+                                                        <th className="py-3.5 px-4 text-center whitespace-nowrap">Số lần ĐN</th>
+                                                        <th className="py-3.5 px-3 whitespace-nowrap">Giáo viên cấp</th>
+                                                        <th className="py-3.5 pr-4 pl-2 text-right whitespace-nowrap">Thao tác</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody className="divide-y divide-slate-100/50">
                                                     {filtered.map((item, idx) => (
-                                                        <tr key={item.id} className="text-xs text-slate-700 hover:bg-slate-50/50 transition-colors">
-                                                            <td className="py-3 pl-4 font-bold text-slate-400">{idx + 1}</td>
-                                                            <td className="py-3 font-mono font-bold text-indigo-600">{item.id}</td>
-                                                            <td className="py-3 font-bold text-slate-800">{item.fullName}</td>
-                                                            <td className="py-3 font-bold text-slate-500">{item.class}</td>
-                                                            <td className="py-3 font-mono font-bold text-emerald-600">{item.password}</td>
-                                                            <td className="py-3 text-[10px] text-slate-400 font-medium">{item.teacher || 'thaytuan@admin'}</td>
+                                                        <tr key={item.id} className="text-xs text-slate-700 hover:bg-slate-50/60 transition-colors">
+                                                            <td className="py-3 pl-4 pr-2 text-center font-bold text-slate-400">{idx + 1}</td>
+                                                            <td className="py-3 px-3 font-mono font-bold text-indigo-600 whitespace-nowrap">{item.id}</td>
+                                                            <td className="py-3 px-4 font-bold text-slate-800">{item.fullName}</td>
+                                                            <td className="py-3 px-3 text-center font-bold text-slate-500 whitespace-nowrap">{item.class}</td>
+                                                            <td className="py-3 px-3 font-mono font-bold text-emerald-600 whitespace-nowrap">{item.password}</td>
+                                                            <td className="py-3 px-4 text-center whitespace-nowrap">
+                                                                <span 
+                                                                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] ${
+                                                                        Number(item.loginCount || 0) > 0 
+                                                                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/80 font-black shadow-xs' 
+                                                                            : 'bg-slate-100 text-slate-400 font-bold'
+                                                                    }`}
+                                                                    title={item.lastLogin ? `Lần đăng nhập gần nhất: ${item.lastLogin}` : 'Chưa từng đăng nhập hệ thống'}
+                                                                >
+                                                                    <Icon name="log-in" size={11} className={Number(item.loginCount || 0) > 0 ? 'text-emerald-600' : 'text-slate-400'} />
+                                                                    <span>{Number(item.loginCount || 0)} lần</span>
+                                                                </span>
+                                                                {item.lastLogin && (
+                                                                    <div className="text-[9px] text-slate-400 font-medium mt-0.5 tracking-tight" title={`Đăng nhập gần nhất: ${item.lastLogin}`}>
+                                                                        {item.lastLogin}
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                            <td className="py-3 px-3 text-[11px] text-slate-400 font-medium whitespace-nowrap">{item.teacher || 'thaytuan@admin'}</td>
                                                             
-                                                            <td className="py-3 pr-4 text-right flex justify-end gap-1.5">
-                                                                <button onClick={() => resetToDefaultPassword(item)} className="p-1.5 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-500 hover:text-white border border-amber-100 transition-all font-bold" title="Reset về mật khẩu mặc định">
-                                                                    <Icon name="rotate-ccw" size={12}/>
-                                                                </button>
-                                                                <button onClick={() => changePassword(item)} className="p-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-600 hover:text-white border border-blue-100 transition-all font-bold" title="Đổi mật khẩu tùy chọn">
-                                                                    <Icon name="key" size={12}/>
-                                                                </button>
-                                                                <button onClick={() => setEditingStudyScores(item)} className="p-1.5 bg-sky-50 text-sky-600 rounded-lg hover:bg-sky-600 hover:text-white border border-sky-100 transition-all font-bold" title="Nhập điểm học tập">
-                                                                    <Icon name="award" size={12}/>
-                                                                </button>
-                                                                <button onClick={() => deleteStudent(item.id, item.fullName)} className="p-1.5 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-600 hover:text-white border border-rose-100 transition-all" title="Xóa tài khoản">
-                                                                    <Icon name="trash-2" size={12}/>
-                                                                </button>
+                                                            <td className="py-3 pr-4 pl-2 text-right whitespace-nowrap">
+                                                                <div className="flex justify-end items-center gap-1.5">
+                                                                    <button onClick={() => setEditingStudentInfo(item)} className="p-1.5 bg-sky-50 text-sky-600 rounded-lg hover:bg-sky-600 hover:text-white border border-sky-100 transition-all font-bold" title="Chỉnh sửa thông tin học sinh (Mã HS, Họ tên, Lớp, Mật khẩu)">
+                                                                        <Icon name="edit-3" size={12}/>
+                                                                    </button>
+                                                                    <button onClick={() => resetToDefaultPassword(item)} className="p-1.5 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-500 hover:text-white border border-amber-100 transition-all font-bold" title="Reset về mật khẩu mặc định">
+                                                                        <Icon name="rotate-ccw" size={12}/>
+                                                                    </button>
+                                                                    <button onClick={() => changePassword(item)} className="p-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-600 hover:text-white border border-blue-100 transition-all font-bold" title="Đổi mật khẩu tùy chọn">
+                                                                        <Icon name="key" size={12}/>
+                                                                    </button>
+                                                                    <button onClick={() => setEditingStudyScores(item)} className="p-1.5 bg-sky-50 text-sky-600 rounded-lg hover:bg-sky-600 hover:text-white border border-sky-100 transition-all font-bold" title="Nhập điểm học tập">
+                                                                        <Icon name="award" size={12}/>
+                                                                    </button>
+                                                                    <button onClick={() => deleteStudent(item.id, item.fullName)} className="p-1.5 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-600 hover:text-white border border-rose-100 transition-all" title="Xóa tài khoản">
+                                                                        <Icon name="trash-2" size={12}/>
+                                                                    </button>
+                                                                </div>
                                                             </td>
                                                         </tr>
                                                     ))}
@@ -7565,6 +7970,618 @@ if (isset($_GET['action'])) {
                                 </div>
                             </div>
                         )}
+
+                        {editingStudentInfo && (
+                            <EditStudentInfoModal
+                                student={editingStudentInfo}
+                                classes={globalClasses}
+                                onClose={() => setEditingStudentInfo(null)}
+                                showAlert={showAlert}
+                                onSaved={() => loadStudents()}
+                            />
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const cleanCompareName = (name) => {
+            if (!name) return '';
+            return String(name).trim().normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/đ/g, "d")
+                .replace(/Đ/g, "d")
+                .toUpperCase()
+                .replace(/\s+/g, ' ');
+        };
+
+        const ExcelScoreImportModal = ({ 
+            onClose, 
+            classStudents = [], 
+            selectedClass = '', 
+            scoresGrid = {}, 
+            onApplyScores, 
+            showAlert 
+        }) => {
+            const [targetColumn, setTargetColumn] = useState('tx1');
+            const [fileData, setFileData] = useState(null);
+            const [fileName, setFileName] = useState('');
+            const [columnMapping, setColumnMapping] = useState({ sbdCol: 0, nameCol: 1, scoreCol: 2, startRow: 1 });
+            const [headers, setHeaders] = useState([]);
+            const [parsedResults, setParsedResults] = useState(null);
+            const [overwriteExisting, setOverwriteExisting] = useState(true);
+            const [fillMissingWithZero, setFillMissingWithZero] = useState(false);
+            const [showColumnConfig, setShowColumnConfig] = useState(false);
+            const fileInputRef = useRef(null);
+
+            const columnOptions = [
+                { id: 'tx1', label: 'TX 1' },
+                { id: 'tx2', label: 'TX 2' },
+                { id: 'tx3', label: 'TX 3' },
+                { id: 'tx4', label: 'TX 4' },
+                { id: 'tx5', label: 'TX 5' },
+                { id: 'gk', label: 'Giữa kỳ' },
+                { id: 'ck', label: 'Cuối kỳ' },
+            ];
+
+            const downloadSampleTemplate = () => {
+                const sampleData = [
+                    ["SBD", "Họ và tên", "Điểm"]
+                ];
+                classStudents.forEach(s => {
+                    sampleData.push([s.id, s.fullName, ""]);
+                });
+                const ws = window.XLSX.utils.aoa_to_sheet(sampleData);
+                const wb = window.XLSX.utils.book_new();
+                window.XLSX.utils.book_append_sheet(wb, ws, "Diem_" + selectedClass);
+                window.XLSX.writeFile(wb, `mau_nhap_diem_lop_${selectedClass}.xlsx`);
+            };
+
+            const findStudentMatch = (cleanSbd, cleanName, students) => {
+                // 1. Exact ID / SBD match
+                if (cleanSbd) {
+                    const exact = students.find(s => String(s.id).trim().toLowerCase() === cleanSbd.toLowerCase());
+                    if (exact) return exact;
+                }
+
+                // 2. Numeric SBD match
+                if (cleanSbd && !isNaN(cleanSbd)) {
+                    const numSbd = parseInt(cleanSbd, 10);
+                    const numMatch = students.find(s => !isNaN(s.id) && parseInt(s.id, 10) === numSbd);
+                    if (numMatch) return numMatch;
+                }
+
+                // 3. Suffix / SBD match (e.g. SBD is 121201 or 01 matching ID 25121201)
+                if (cleanSbd && cleanSbd.length >= 2) {
+                    const suffix = students.find(s => {
+                        const sId = String(s.id).trim();
+                        return sId.endsWith(cleanSbd) || cleanSbd.endsWith(sId);
+                    });
+                    if (suffix) return suffix;
+                }
+
+                // 4. If SBD is numeric 1-2 digits (like STT in class), check student at that index
+                if (cleanSbd && !isNaN(cleanSbd)) {
+                    const idx = parseInt(cleanSbd, 10) - 1;
+                    if (idx >= 0 && idx < students.length) {
+                        const cand = students[idx];
+                        if (cand) {
+                            if (!cleanName || cleanCompareName(cand.fullName) === cleanCompareName(cleanName) || String(cand.id).endsWith(String(idx + 1).padStart(2, '0'))) {
+                                return cand;
+                            }
+                        }
+                    }
+                }
+
+                // 5. Fallback to Họ và tên match
+                if (cleanName) {
+                    const nameMatch = students.find(s => cleanCompareName(s.fullName) === cleanCompareName(cleanName));
+                    if (nameMatch) return nameMatch;
+                }
+
+                return null;
+            };
+
+            const analyzeData = (rows, mapping) => {
+                if (!rows || rows.length <= mapping.startRow) {
+                    setParsedResults(null);
+                    return;
+                }
+
+                const matched = [];
+                const unmatchedInFile = [];
+                const matchedStudentIds = new Set();
+
+                for (let r = mapping.startRow; r < rows.length; r++) {
+                    const row = rows[r];
+                    if (!row || row.length === 0) continue;
+
+                    const rawSbd = row[mapping.sbdCol];
+                    const rawName = row[mapping.nameCol];
+                    const rawScore = row[mapping.scoreCol];
+
+                    if (rawSbd === undefined && rawName === undefined && rawScore === undefined) continue;
+
+                    const cleanSbd = String(rawSbd !== undefined ? rawSbd : '').trim();
+                    const cleanName = String(rawName !== undefined ? rawName : '').trim();
+                    
+                    let parsedScore = '';
+                    if (rawScore !== undefined && rawScore !== null && String(rawScore).trim() !== '') {
+                        const sStr = String(rawScore).trim().replace(',', '.');
+                        const num = parseFloat(sStr);
+                        if (!isNaN(num)) {
+                            parsedScore = String(Math.round(num * 100) / 100);
+                        } else {
+                            parsedScore = sStr;
+                        }
+                    }
+
+                    if (!cleanSbd && !cleanName) continue;
+
+                    const stu = findStudentMatch(cleanSbd, cleanName, classStudents);
+                    if (stu) {
+                        matchedStudentIds.add(stu.id);
+                        matched.push({
+                            fileSbd: cleanSbd,
+                            fileName: cleanName,
+                            score: parsedScore,
+                            student: stu,
+                            matchType: (cleanSbd && (String(stu.id) === cleanSbd || String(stu.id).endsWith(cleanSbd))) ? 'SBD' : 'Họ tên'
+                        });
+                    } else {
+                        unmatchedInFile.push({
+                            fileSbd: cleanSbd,
+                            fileName: cleanName,
+                            score: parsedScore
+                        });
+                    }
+                }
+
+                const missingStudents = classStudents.filter(s => !matchedStudentIds.has(s.id));
+
+                setParsedResults({
+                    matched,
+                    unmatchedInFile,
+                    missingStudents,
+                    totalRowsInFile: matched.length + unmatchedInFile.length
+                });
+            };
+
+            const handleFileSelect = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setFileName(file.name);
+
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const bstr = evt.target.result;
+                        const wb = window.XLSX.read(bstr, { type: 'binary' });
+                        const wsname = wb.SheetNames[0];
+                        const ws = wb.Sheets[wsname];
+                        const rawRows = window.XLSX.utils.sheet_to_json(ws, { header: 1 });
+                        if (!rawRows || rawRows.length === 0) {
+                            showAlert("File Excel không có dữ liệu!");
+                            return;
+                        }
+
+                        let sbdCol = -1;
+                        let nameCol = -1;
+                        let scoreCol = -1;
+                        let headerRowIndex = -1;
+
+                        for (let r = 0; r < Math.min(rawRows.length, 6); r++) {
+                            const row = rawRows[r] || [];
+                            for (let c = 0; c < row.length; c++) {
+                                const cellVal = String(row[c] || '').toLowerCase().trim();
+                                const norm = cellVal.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d");
+                                
+                                if (sbdCol === -1 && (
+                                    norm === 'sbd' || norm.includes('so bao danh') || norm.includes('sobaodanh') || 
+                                    norm.includes('ma hs') || norm.includes('mahocsinh') || norm.includes('ma so') || 
+                                    norm === 'id' || norm === 'mssv'
+                                )) {
+                                    sbdCol = c;
+                                    headerRowIndex = r;
+                                }
+                                if (nameCol === -1 && (
+                                    norm.includes('ho va ten') || norm.includes('ho ten') || norm.includes('hoten') || 
+                                    norm === 'ten' || norm === 'name' || norm === 'fullname' || norm.includes('hoc sinh')
+                                )) {
+                                    nameCol = c;
+                                    headerRowIndex = r;
+                                }
+                                if (scoreCol === -1 && (
+                                    norm.includes('diem') || norm === 'score' || norm.includes('tong diem') || 
+                                    norm.includes('ket qua') || norm === 'kq' || norm.includes('tx')
+                                )) {
+                                    scoreCol = c;
+                                    headerRowIndex = r;
+                                }
+                            }
+                            if (sbdCol !== -1 && scoreCol !== -1) {
+                                break;
+                            }
+                        }
+
+                        const firstDataRow = headerRowIndex !== -1 ? headerRowIndex + 1 : 1;
+                        const sampleRow = rawRows[firstDataRow] || rawRows[0] || [];
+                        const detectedHeaders = (headerRowIndex !== -1 ? rawRows[headerRowIndex] : []) || [];
+
+                        if (sbdCol === -1 || scoreCol === -1) {
+                            if (sampleRow.length <= 3) {
+                                sbdCol = 0;
+                                nameCol = 1;
+                                scoreCol = 2;
+                            } else {
+                                sbdCol = 1;
+                                nameCol = 2;
+                                scoreCol = 3;
+                            }
+                        }
+                        if (nameCol === -1) {
+                            nameCol = sbdCol === 0 ? 1 : (sbdCol === 1 ? 2 : 1);
+                        }
+
+                        setFileData(rawRows);
+                        setHeaders(detectedHeaders);
+                        const mapping = { sbdCol, nameCol, scoreCol, startRow: firstDataRow };
+                        setColumnMapping(mapping);
+                        analyzeData(rawRows, mapping);
+                    } catch (err) {
+                        showAlert("Lỗi đọc file Excel: " + (err.message || "Định dạng không hợp lệ"));
+                    }
+                };
+                reader.readAsBinaryString(file);
+                e.target.value = null;
+            };
+
+            const handleColumnChange = (field, val) => {
+                const newMapping = { ...columnMapping, [field]: parseInt(val, 10) };
+                setColumnMapping(newMapping);
+                if (fileData) {
+                    analyzeData(fileData, newMapping);
+                }
+            };
+
+            const handleConfirmImport = () => {
+                if (!parsedResults || parsedResults.matched.length === 0) {
+                    showAlert("Không có điểm học sinh nào khớp để nhập!");
+                    return;
+                }
+
+                const newGrid = { ...scoresGrid };
+                let appliedCount = 0;
+
+                parsedResults.matched.forEach(item => {
+                    const sId = item.student.id;
+                    const currentScore = newGrid[sId]?.[targetColumn] || '';
+                    if (overwriteExisting || currentScore === '') {
+                        newGrid[sId] = {
+                            ...(newGrid[sId] || {}),
+                            [targetColumn]: item.score
+                        };
+                        appliedCount++;
+                    }
+                });
+
+                if (fillMissingWithZero && parsedResults.missingStudents) {
+                    parsedResults.missingStudents.forEach(stu => {
+                        newGrid[stu.id] = {
+                            ...(newGrid[stu.id] || {}),
+                            [targetColumn]: "0"
+                        };
+                    });
+                }
+
+                onApplyScores(newGrid, targetColumn, appliedCount);
+                onClose();
+            };
+
+            const maxColCount = fileData && fileData.length > 0 ? Math.max(...fileData.slice(0, 5).map(r => r ? r.length : 0)) : 4;
+            const colOptions = Array.from({ length: maxColCount }, (_, i) => {
+                const colLetter = String.fromCharCode(65 + i);
+                const colHeader = headers[i] ? ` (${headers[i]})` : '';
+                return { index: i, label: `Cột ${colLetter}${colHeader}` };
+            });
+
+            return (
+                <div className="fixed inset-0 z-[160] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white w-full max-w-3xl rounded-[2rem] shadow-2xl flex flex-col max-h-[92vh] overflow-hidden border border-slate-100 animate-in zoom-in-95 duration-200">
+                        {/* Header */}
+                        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-700 text-white p-5 flex justify-between items-center shrink-0">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2.5 bg-white/15 rounded-2xl">
+                                    <Icon name="file-spreadsheet" size={22} />
+                                </div>
+                                <div>
+                                    <h3 className="font-black text-sm uppercase tracking-wide">Nhập điểm từ File Excel (SBD)</h3>
+                                    <p className="text-[11px] text-teal-100/90 font-medium">Nhận diện Số báo danh & đổ vào cột điểm lớp <b>{selectedClass}</b></p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all"
+                            >
+                                <Icon name="x" size={16} />
+                            </button>
+                        </div>
+
+                        {/* Content Body */}
+                        <div className="flex-1 overflow-y-auto p-6 space-y-5 custom-scrollbar bg-slate-50/40">
+                            {/* Target Column Selector */}
+                            <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm space-y-2.5">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[11px] font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                                        <Icon name="award" size={14} className="text-emerald-600" />
+                                        1. Chọn Cột Điểm Đích Muốn Nhập Vào:
+                                    </label>
+                                    <button 
+                                        type="button" 
+                                        onClick={downloadSampleTemplate}
+                                        className="text-[10px] font-black text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors"
+                                        title="Tải file mẫu Excel có sẵn danh sách SBD lớp này"
+                                    >
+                                        <Icon name="download" size={12} /> Tải file mẫu lớp {selectedClass}
+                                    </button>
+                                </div>
+                                <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
+                                    {columnOptions.map(col => {
+                                        const isSelected = targetColumn === col.id;
+                                        return (
+                                            <button
+                                                key={col.id}
+                                                type="button"
+                                                onClick={() => setTargetColumn(col.id)}
+                                                className={`py-2 px-1 rounded-xl font-black text-xs transition-all border text-center ${
+                                                    isSelected 
+                                                        ? 'bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-600/25' 
+                                                        : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                                                }`}
+                                            >
+                                                {col.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            {/* File Upload Box */}
+                            <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm space-y-3">
+                                <label className="text-[11px] font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                                    <Icon name="upload" size={14} className="text-teal-600" />
+                                    2. Chọn File Excel (.xlsx, .xls, .csv):
+                                </label>
+
+                                <input
+                                    type="file"
+                                    ref={fileInputRef}
+                                    accept=".xlsx, .xls, .csv"
+                                    className="hidden"
+                                    onChange={handleFileSelect}
+                                />
+
+                                {!fileData ? (
+                                    <div 
+                                        onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                                        className="border-2 border-dashed border-slate-200 hover:border-emerald-500 rounded-2xl p-6 text-center cursor-pointer bg-slate-50/50 hover:bg-emerald-50/30 transition-all group"
+                                    >
+                                        <div className="w-12 h-12 bg-emerald-100/80 text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white rounded-2xl flex items-center justify-center mx-auto mb-2 transition-all">
+                                            <Icon name="file-spreadsheet" size={24} />
+                                        </div>
+                                        <p className="text-xs font-bold text-slate-700 group-hover:text-emerald-700">Bấm vào đây để tải lên file Excel điểm</p>
+                                        <p className="text-[10px] text-slate-400 mt-1">File chỉ cần 3 cột: <b>SBD</b>, <b>Họ và tên</b>, <b>Điểm</b> (hoặc tương đương)</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-3">
+                                        <div className="flex items-center justify-between bg-emerald-50/80 border border-emerald-200 p-3 rounded-xl">
+                                            <div className="flex items-center gap-2.5">
+                                                <Icon name="file-spreadsheet" size={18} className="text-emerald-700" />
+                                                <div>
+                                                    <p className="text-xs font-black text-emerald-900">{fileName}</p>
+                                                    <p className="text-[10px] text-emerald-700">Đã đọc {fileData.length - columnMapping.startRow} dòng dữ liệu</p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowColumnConfig(!showColumnConfig)}
+                                                    className="px-2.5 py-1.5 bg-white border border-emerald-300 text-emerald-800 text-[10px] font-bold rounded-lg hover:bg-emerald-100 transition-all"
+                                                >
+                                                    {showColumnConfig ? "Ẩn chỉnh cột" : "Chỉnh cột dữ liệu"}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                                                    className="px-2.5 py-1.5 bg-emerald-600 text-white text-[10px] font-bold rounded-lg hover:bg-emerald-700 transition-all"
+                                                >
+                                                    Đổi file khác
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Column config if user wants to override */}
+                                        {showColumnConfig && (
+                                            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-2 animate-in slide-in-from-top-2">
+                                                <p className="text-[10px] font-bold text-slate-500 uppercase">Tùy chỉnh cột trong File Excel:</p>
+                                                <div className="grid grid-cols-3 gap-3">
+                                                    <div>
+                                                        <label className="block text-[10px] font-bold text-slate-600 mb-1">Cột SBD:</label>
+                                                        <select
+                                                            value={columnMapping.sbdCol}
+                                                            onChange={e => handleColumnChange('sbdCol', e.target.value)}
+                                                            className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs font-bold text-slate-700"
+                                                        >
+                                                            {colOptions.map(opt => (
+                                                                <option key={opt.index} value={opt.index}>{opt.label}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-[10px] font-bold text-slate-600 mb-1">Cột Họ tên:</label>
+                                                        <select
+                                                            value={columnMapping.nameCol}
+                                                            onChange={e => handleColumnChange('nameCol', e.target.value)}
+                                                            className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs font-bold text-slate-700"
+                                                        >
+                                                            {colOptions.map(opt => (
+                                                                <option key={opt.index} value={opt.index}>{opt.label}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-[10px] font-bold text-slate-600 mb-1">Cột Điểm:</label>
+                                                        <select
+                                                            value={columnMapping.scoreCol}
+                                                            onChange={e => handleColumnChange('scoreCol', e.target.value)}
+                                                            className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs font-bold text-slate-700"
+                                                        >
+                                                            {colOptions.map(opt => (
+                                                                <option key={opt.index} value={opt.index}>{opt.label}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Analysis Summary & Options */}
+                            {parsedResults && (
+                                <div className="space-y-4">
+                                    {/* Stats grid */}
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                        <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
+                                            <p className="text-[10px] font-black uppercase text-slate-400">Dòng trong file</p>
+                                            <p className="text-lg font-black text-slate-800 mt-0.5">{parsedResults.totalRowsInFile}</p>
+                                        </div>
+                                        <div className="bg-emerald-50/80 p-3 rounded-2xl border border-emerald-200 shadow-sm text-center">
+                                            <p className="text-[10px] font-black uppercase text-emerald-600">Khớp với lớp</p>
+                                            <p className="text-lg font-black text-emerald-700 mt-0.5">{parsedResults.matched.length} / {classStudents.length}</p>
+                                        </div>
+                                        <div className="bg-amber-50/80 p-3 rounded-2xl border border-amber-200 shadow-sm text-center">
+                                            <p className="text-[10px] font-black uppercase text-amber-600">Không tìm thấy</p>
+                                            <p className="text-lg font-black text-amber-700 mt-0.5">{parsedResults.unmatchedInFile.length}</p>
+                                        </div>
+                                        <div className="bg-slate-100 p-3 rounded-2xl border border-slate-200 shadow-sm text-center">
+                                            <p className="text-[10px] font-black uppercase text-slate-500">Chưa có điểm</p>
+                                            <p className="text-lg font-black text-slate-700 mt-0.5">{parsedResults.missingStudents.length}</p>
+                                        </div>
+                                    </div>
+
+                                    {/* Options */}
+                                    <div className="bg-white p-3.5 rounded-2xl border border-slate-200/80 shadow-sm flex flex-wrap gap-4 text-xs">
+                                        <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-700 select-none">
+                                            <input
+                                                type="checkbox"
+                                                checked={overwriteExisting}
+                                                onChange={e => setOverwriteExisting(e.target.checked)}
+                                                className="w-4 h-4 rounded text-emerald-600 accent-emerald-600"
+                                            />
+                                            Ghi đè nếu học sinh đã có điểm ở cột này
+                                        </label>
+                                        <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-700 select-none">
+                                            <input
+                                                type="checkbox"
+                                                checked={fillMissingWithZero}
+                                                onChange={e => setFillMissingWithZero(e.target.checked)}
+                                                className="w-4 h-4 rounded text-emerald-600 accent-emerald-600"
+                                            />
+                                            Gán 0 điểm nếu học sinh trong lớp không có trong file
+                                        </label>
+                                    </div>
+
+                                    {/* Preview Table */}
+                                    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+                                        <div className="p-3 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                                            <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-700">
+                                                Xem trước kết quả nhận diện ({parsedResults.matched.length} HS được khớp)
+                                            </h4>
+                                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">
+                                                Đích: {targetColumn.toUpperCase()}
+                                            </span>
+                                        </div>
+                                        <div className="max-h-56 overflow-y-auto custom-scrollbar">
+                                            <table className="w-full text-left text-xs border-collapse">
+                                                <thead className="sticky top-0 bg-slate-100/90 backdrop-blur-sm text-[9px] font-black uppercase text-slate-500 border-b border-slate-200">
+                                                    <tr>
+                                                        <th className="py-2 pl-3">STT</th>
+                                                        <th className="py-2">SBD File</th>
+                                                        <th className="py-2">Họ tên File</th>
+                                                        <th className="py-2 text-center">Điểm</th>
+                                                        <th className="py-2">Khớp học sinh trong lớp</th>
+                                                        <th className="py-2 pr-3 text-right">Nhận diện qua</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100 font-medium">
+                                                    {parsedResults.matched.map((item, idx) => (
+                                                        <tr key={idx} className="hover:bg-emerald-50/30 transition-colors">
+                                                            <td className="py-2 pl-3 text-slate-400 font-bold text-[10px]">{idx + 1}</td>
+                                                            <td className="py-2 font-mono font-bold text-slate-700">{item.fileSbd || '—'}</td>
+                                                            <td className="py-2 font-bold text-slate-800">{item.fileName || '—'}</td>
+                                                            <td className="py-2 text-center">
+                                                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-black rounded-md text-xs">
+                                                                    {item.score !== '' ? item.score : '—'}
+                                                                </span>
+                                                            </td>
+                                                            <td className="py-2 font-bold text-indigo-700">
+                                                                {item.student.fullName} <span className="font-mono text-[10px] text-slate-400">({item.student.id})</span>
+                                                            </td>
+                                                            <td className="py-2 pr-3 text-right">
+                                                                <span className="px-1.5 py-0.5 bg-sky-50 text-sky-700 border border-sky-200 rounded text-[9px] font-bold">
+                                                                    {item.matchType}
+                                                                </span>
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                    {parsedResults.unmatchedInFile.map((item, idx) => (
+                                                        <tr key={'unmatched-' + idx} className="bg-amber-50/40 hover:bg-amber-50 text-amber-900">
+                                                            <td className="py-2 pl-3 text-amber-400 font-bold text-[10px]">!</td>
+                                                            <td className="py-2 font-mono font-bold text-amber-800">{item.fileSbd || '—'}</td>
+                                                            <td className="py-2 font-bold text-amber-900">{item.fileName || '—'}</td>
+                                                            <td className="py-2 text-center font-bold">{item.score || '—'}</td>
+                                                            <td className="py-2 text-[11px] text-amber-600 italic">Không tìm thấy trong lớp {selectedClass}</td>
+                                                            <td className="py-2 pr-3 text-right">
+                                                                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-[9px] font-bold">Bỏ qua</span>
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="p-4 bg-white border-t border-slate-100 flex justify-between items-center shrink-0">
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold rounded-xl transition-all"
+                            >
+                                Hủy bỏ
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleConfirmImport}
+                                disabled={!parsedResults || parsedResults.matched.length === 0}
+                                className={`px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all shadow-md ${
+                                    parsedResults && parsedResults.matched.length > 0
+                                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-emerald-600/20'
+                                        : 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
+                                }`}
+                            >
+                                <Icon name="check" size={14} />
+                                {parsedResults && parsedResults.matched.length > 0
+                                    ? `Đổ điểm vào cột ${targetColumn.toUpperCase()} (${parsedResults.matched.length} HS)`
+                                    : 'Xác nhận nhập điểm'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             );
@@ -7573,6 +8590,8 @@ if (isset($_GET['action'])) {
         const GradebookModal = ({ onClose, showAlert, showConfirm, showDangerConfirm, globalClasses = [], initialClass = null }) => {
             const [students, setStudents] = useState([]);
             const [editingBonusPoints, setEditingBonusPoints] = useState(null);
+            const [editingStudentInfo, setEditingStudentInfo] = useState(null);
+            const [showExcelScoreModal, setShowExcelScoreModal] = useState(false);
 
             const handleSaveBonusPoints = (studentId, semester, totalPoints, historyList, callback) => {
                 const student = students.find(s => s.id === studentId);
@@ -8058,6 +9077,9 @@ if (isset($_GET['action'])) {
                                             </div>
                                             
                                             <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+                                                <button onClick={() => setShowExcelScoreModal(true)} className="flex-1 sm:flex-none justify-center px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black uppercase tracking-widest text-[9px] rounded-xl transition-all flex items-center gap-1.5 shadow-md shadow-emerald-600/20" title="Nhập điểm từ file Excel theo SBD, Họ tên, Điểm vào cột TX mong muốn">
+                                                    <Icon name="file-spreadsheet" size={11}/> Upload điểm Excel (SBD)
+                                                </button>
                                                 <button onClick={() => setShowUploadGuide(!showUploadGuide)} className="flex-1 sm:flex-none justify-center px-3.5 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 font-black uppercase tracking-widest text-[9px] rounded-xl transition-all flex items-center gap-1.5 shadow-sm">
                                                     <Icon name="help-circle" size={11}/> Hướng dẫn Excel
                                                 </button>
@@ -8254,7 +9276,19 @@ if (isset($_GET['action'])) {
                                                                     <tr key={s.id} className="text-xs text-slate-700 hover:bg-slate-50/30 transition-colors">
                                                                         <td className="py-2 pl-4 text-left font-bold text-slate-400">{String(idx + 1).padStart(2, '0')}</td>
                                                                         <td className="py-2 text-left font-mono font-bold text-slate-400">{s.id}</td>
-                                                                        <td className="py-2 text-left font-bold text-slate-800 pl-2">{s.fullName}</td>
+                                                                        <td className="py-2 text-left font-bold text-slate-800 pl-2">
+                                                                            <div className="flex items-center gap-1.5">
+                                                                                <span>{s.fullName}</span>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => setEditingStudentInfo(s)}
+                                                                                    className="p-1 text-slate-400 hover:text-sky-600 hover:bg-sky-100/70 rounded-md transition-all shrink-0"
+                                                                                    title="Chỉnh sửa thông tin học sinh (Mã HS, Họ tên, Lớp, Mật khẩu)"
+                                                                                >
+                                                                                    <Icon name="edit-3" size={12} />
+                                                                                </button>
+                                                                            </div>
+                                                                        </td>
                                                                         <td className="py-1">
                                                                             <input type="text" value={sScores.tx1 || ''} onChange={e => handleCellChange(s.id, 'tx1', e.target.value)} className="w-12 px-1 py-1 border border-emerald-200 bg-emerald-50/30 text-emerald-800 rounded-lg text-center font-bold outline-none focus:bg-white focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/20 text-xs" />
                                                                         </td>
@@ -8406,6 +9440,41 @@ if (isset($_GET['action'])) {
                                 }} 
                                 onSave={handleSaveBonusPoints}
                                 showAlert={showAlert}
+                            />
+                        )}
+                        {editingStudentInfo && (
+                            <EditStudentInfoModal 
+                                student={editingStudentInfo}
+                                classes={globalClasses}
+                                onClose={() => setEditingStudentInfo(null)}
+                                showAlert={showAlert}
+                                onSaved={(updatedStudent, oldId) => {
+                                    if (oldId !== updatedStudent.id) {
+                                        setScoresGrid(prev => {
+                                            const next = { ...prev };
+                                            if (next[oldId] !== undefined) {
+                                                next[updatedStudent.id] = next[oldId];
+                                                delete next[oldId];
+                                            }
+                                            return next;
+                                        });
+                                    }
+                                    loadGradebookData();
+                                }}
+                            />
+                        )}
+                        {showExcelScoreModal && (
+                            <ExcelScoreImportModal 
+                                onClose={() => setShowExcelScoreModal(false)}
+                                classStudents={classStudents}
+                                selectedClass={selectedClass}
+                                scoresGrid={scoresGrid}
+                                showAlert={showAlert}
+                                onApplyScores={(newGrid, colName, count) => {
+                                    setScoresGrid(newGrid);
+                                    setIsScoresSaved(false);
+                                    showAlert(`Đã đổ điểm vào cột ${colName.toUpperCase()} cho ${count}/${classStudents.length} học sinh lớp ${selectedClass}! Nhớ bấm "Lưu Sổ Điểm" để lưu lại.`);
+                                }}
                             />
                         )}
                     </div>
