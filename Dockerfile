@@ -32,4 +32,4 @@ RUN mkdir -p /var/www/html/uploads \
 EXPOSE 80
 
 # Khoi dong Apache tu dong nhan PORT tu Railway / Render
-CMD sh -c "sed -i 's/Listen 80/Listen '\${PORT:-80}'/' /etc/apache2/ports.conf && sed -i 's/:80/: '\${PORT:-80}'/' /etc/apache2/sites-available/000-default.conf && apache2-foreground"
+CMD sed -i "s/Listen 80/Listen ${PORT:-80}/" /etc/apache2/ports.conf && sed -i "s/:80/:${PORT:-80}/" /etc/apache2/sites-available/000-default.conf && apache2-foreground
